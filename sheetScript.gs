@@ -11,7 +11,7 @@ var maxVideos = 200;
 // playlist so daily upload batches end up in intended viewing order rather
 // than the channel's reverse upload order. Reading the playlist is cheap
 // (1 unit/page); each move costs 50 units.
-var sortRecentDays = 2;
+var sortRecentDays = 4;
 
 // Errorflags
 var errorflag = false;
@@ -162,7 +162,7 @@ function updatePlaylists(sheet) {
         // ...add videos to playlist...
         if (!debugFlag_dontUpdatePlaylists) {
           addVideosToPlaylist(playlistId, newVideoIds);
-          if (newVideoIds.length > 0) sortRecentPlaylistItems(playlistId);
+          sortRecentPlaylistItems(playlistId);
         } else {
           addError("Don't Update Playlists debug flag is set");
         }
