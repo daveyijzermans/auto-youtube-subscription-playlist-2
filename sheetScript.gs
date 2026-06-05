@@ -7,6 +7,12 @@
 // Adjustable to quota of Youtube API
 var maxVideos = 200;
 
+// After adding new videos, reorder the last N days' worth of items in the
+// playlist so daily upload batches end up in intended viewing order rather
+// than the channel's reverse upload order. Reading the playlist is cheap
+// (1 unit/page); each move costs 50 units.
+var sortRecentDays = 2;
+
 // Errorflags
 var errorflag = false;
 var plErrorCount = 0;
@@ -156,6 +162,7 @@ function updatePlaylists(sheet) {
         // ...add videos to playlist...
         if (!debugFlag_dontUpdatePlaylists) {
           addVideosToPlaylist(playlistId, newVideoIds);
+          if (newVideoIds.length > 0) sortRecentPlaylistItems(playlistId);
         } else {
           addError("Don't Update Playlists debug flag is set");
         }
@@ -505,6 +512,104 @@ function addVideosToPlaylist(playlistId, videoIds, idx = 0, successCount = 0, er
   } else {	
     addError("The query contains "+totalVids+" videos. Script cannot add more than "+maxVideos+" videos. Try moving the timestamp closer to today.")	
   }
+}
+
+// Reorder the tail of the playlist (items within sortRecentDays of the newest
+// upload) so within each day, videos are sorted newest-uploaded first —
+// matching intended viewing order for channels that upload batches in reverse.
+function sortRecentPlaylistItems(playlistId) {
+  // Fetch all playlist items so we can find the tail
+  var allItems = [];
+  var nextPageToken = '';
+  do {
+    try {
+      var results = YouTube.PlaylistItems.list('id,contentDetails', {
+        playlistId: playlistId,
+        maxResults: 50,
+        pageToken: nextPageToken
+      });
+      if (!results || !results.items) break;
+      for (var j = 0; j < results.items.length; j++) {
+        var item = results.items[j];
+        if (!item.contentDetails || !item.contentDetails.videoPublishedAt) continue;
+        allItems.push({
+          playlistItemId: item.id,
+          videoId: item.contentDetails.videoId,
+          publishedAt: item.contentDetails.videoPublishedAt
+        });
+      }
+      nextPageToken = results.nextPageToken;
+    } catch (e) {
+      addError("Cannot fetch playlist " + playlistId + " for sorting, ERROR: Message: [" + e.message + "] Details: " + JSON.stringify(e.details));
+      return;
+    }
+  } while (nextPageToken != null);
+
+  if (allItems.length < 2) return;
+
+  // Identify the tail: items whose UTC date is within sortRecentDays of the newest item's date
+  var newestDate = allItems[allItems.length - 1].publishedAt;
+  var cutoff = new Date(newestDate.substring(0, 10) + "T00:00:00Z");
+  cutoff.setUTCDate(cutoff.getUTCDate() - (sortRecentDays - 1));
+  var cutoffStr = cutoff.toISOString();
+
+  var tailStart = -1;
+  for (var i = 0; i < allItems.length; i++) {
+    if (allItems[i].publishedAt >= cutoffStr) { tailStart = i; break; }
+  }
+  if (tailStart === -1 || tailStart === allItems.length - 1) return;
+
+  var tail = allItems.slice(tailStart);
+
+  // Compute target order: group by UTC date ascending, within day sort newest-first
+  var sortedTail = tail.slice().sort(function (a, b) {
+    var dateA = a.publishedAt.substring(0, 10);
+    var dateB = b.publishedAt.substring(0, 10);
+    if (dateA !== dateB) return dateA.localeCompare(dateB);
+    return b.publishedAt.localeCompare(a.publishedAt);
+  });
+
+  // Track current positions locally so we can skip no-op moves and update after each shift
+  var positionMap = {};
+  for (var i = 0; i < tail.length; i++) {
+    positionMap[tail[i].playlistItemId] = tailStart + i;
+  }
+
+  var moves = 0;
+  for (var i = 0; i < sortedTail.length; i++) {
+    var target = sortedTail[i];
+    var targetPos = tailStart + i;
+    var currentPos = positionMap[target.playlistItemId];
+    if (currentPos === targetPos) continue;
+
+    try {
+      YouTube.PlaylistItems.update({
+        id: target.playlistItemId,
+        snippet: {
+          playlistId: playlistId,
+          resourceId: { kind: "youtube#video", videoId: target.videoId },
+          position: targetPos
+        }
+      }, 'snippet');
+      moves++;
+
+      // Update local position map to reflect the shift
+      for (var pid in positionMap) {
+        if (pid === target.playlistItemId) continue;
+        var p = positionMap[pid];
+        if (targetPos < currentPos && targetPos <= p && p < currentPos) {
+          positionMap[pid] = p + 1;
+        } else if (targetPos > currentPos && currentPos < p && p <= targetPos) {
+          positionMap[pid] = p - 1;
+        }
+      }
+      positionMap[target.playlistItemId] = targetPos;
+    } catch (e) {
+      addError("Couldn't reorder playlist item " + target.playlistItemId + ", ERROR: Message: [" + e.message + "] Details: " + JSON.stringify(e.details));
+    }
+  }
+
+  if (moves > 0) Logger.log("Reordered " + moves + " item(s) in playlist tail.");
 }
 
 // Delete Videos from Playlist if they're older than the defined time
